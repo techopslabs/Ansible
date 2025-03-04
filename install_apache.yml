@@ -1,0 +1,23 @@
+---
+# Playbook: install_apache_simple.yml
+# Description: Simple playbook to install Apache web server
+
+- name: Install Apache
+  hosts: webservers  # Target host group as defined in your inventory
+  become: yes        # Use sudo to execute commands
+  
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      
+    - name: Install Apache
+      apt:
+        name: apache2
+        state: present
+      
+    - name: Ensure Apache is running and enabled at boot
+      service:
+        name: apache2
+        state: started
+        enabled: yes
