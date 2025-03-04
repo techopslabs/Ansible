@@ -1,5 +1,5 @@
 ---
-# Playbook: install_apache_simple.yml
+# Playbook: install_apache.yml
 # Description: Simple playbook to install Apache web server
 
 - name: Install Apache
