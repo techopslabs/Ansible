@@ -1,23 +1,33 @@
 ---
-# Ansible Playbook for Zabbix Installation on Ubuntu 22.04
-# Save this as zabbix_install.yml
+# Complete Ansible Playbook for Zabbix Installation on Ubuntu 22.04
 
 - name: Install Zabbix Server on Ubuntu 22.04
   hosts: webservers
   become: yes
   vars:
-    zabbix_version: "7.4"
+    zabbix_version: "7.2"
     ubuntu_version: "ubuntu22.04"
-    zabbix_repo_url: "https://repo.zabbix.com/zabbix/7.4/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.4-0.1%2Bubuntu16.04_all.deb"
+    zabbix_repo_url: "https://repo.zabbix.com/zabbix/7.2/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.2+ubuntu22.04_all.deb"
     db_password: "Secure@password@321"
     timezone: "UTC"
 
   tasks:
+    # Initial system preparation
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
 
+    - name: Install required dependencies
+      apt:
+        name:
+          - wget
+          - gnupg
+          - software-properties-common
+          - apt-transport-https
+        state: present
+
+    # Zabbix repository setup
     - name: Download Zabbix repository package
       get_url:
         url: "{{ zabbix_repo_url }}"
@@ -34,7 +44,8 @@
         update_cache: yes
       when: download_repo.changed
 
-    - name: Install Zabbix components
+    # Install Zabbix components
+    - name: Install Zabbix server, frontend, agent and related components
       apt:
         name:
           - zabbix-server-mysql
@@ -44,10 +55,17 @@
           - zabbix-agent
         state: present
 
+    # MySQL database setup
     - name: Install MySQL server
       apt:
         name: mysql-server
         state: present
+
+    - name: Ensure MySQL is running
+      service:
+        name: mysql
+        state: started
+        enabled: yes
 
     - name: Create Zabbix database
       mysql_db:
@@ -64,7 +82,7 @@
         priv: 'zabbix.*:ALL'
         state: present
 
-    - name: Enable log_bin_trust_function_creators
+    - name: Enable log_bin_trust_function_creators for SQL import
       mysql_variables:
         variable: log_bin_trust_function_creators
         value: 1
@@ -76,25 +94,77 @@
         executable: /bin/bash
       register: import_result
       changed_when: import_result.rc == 0
+      # Adding a timeout as this can take a while for large schemas
+      async: 600
+      poll: 15
 
-    - name: Disable log_bin_trust_function_creators
+    - name: Disable log_bin_trust_function_creators after import
       mysql_variables:
         variable: log_bin_trust_function_creators
         value: 0
         mode: global
 
+    # Configure Zabbix server
     - name: Configure Zabbix server database connection
       lineinfile:
         path: /etc/zabbix/zabbix_server.conf
         regexp: '^# DBPassword='
         line: "DBPassword={{ db_password }}"
 
+    - name: Configure Zabbix server cache settings
+      lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: '^# CacheSize=', line: 'CacheSize=128M' }
+        - { regexp: '^# StartPollers=', line: 'StartPollers=10' }
+        - { regexp: '^# StartPingers=', line: 'StartPingers=10' }
+        - { regexp: '^# StartDiscoverers=', line: 'StartDiscoverers=5' }
+        - { regexp: '^# StartHTTPPollers=', line: 'StartHTTPPollers=5' }
+
+    # Configure PHP for Zabbix frontend
     - name: Configure PHP timezone
       replace:
         path: /etc/php/*/apache2/php.ini
         regexp: ';date.timezone ='
         replace: "date.timezone = {{ timezone }}"
 
+    - name: Configure PHP memory limit
+      replace:
+        path: /etc/php/*/apache2/php.ini
+        regexp: 'memory_limit = 128M'
+        replace: 'memory_limit = 256M'
+
+    - name: Configure PHP max execution time
+      replace:
+        path: /etc/php/*/apache2/php.ini
+        regexp: 'max_execution_time = 30'
+        replace: 'max_execution_time = 300'
+
+    - name: Configure PHP post max size
+      replace:
+        path: /etc/php/*/apache2/php.ini
+        regexp: 'post_max_size = 8M'
+        replace: 'post_max_size = 16M'
+
+    - name: Configure PHP upload max filesize
+      replace:
+        path: /etc/php/*/apache2/php.ini
+        regexp: 'upload_max_filesize = 2M'
+        replace: 'upload_max_filesize = 16M'
+
+    # Configure Apache for Zabbix
+    - name: Ensure Apache has required modules
+      apache2_module:
+        state: present
+        name: "{{ item }}"
+      with_items:
+        - rewrite
+        - ssl
+        - headers
+
+    # Start and enable services
     - name: Start and enable Zabbix server
       systemd:
         name: zabbix-server
@@ -113,14 +183,50 @@
         state: restarted
         enabled: yes
 
+    # Configure firewall (using ufw)
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+
+    - name: Configure UFW for Zabbix
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      with_items:
+        - 80   # HTTP for Zabbix web interface
+        - 443  # HTTPS for Zabbix web interface
+        - 10050 # Zabbix agent
+        - 10051 # Zabbix server
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    # Cleanup
     - name: Cleanup temporary files
       file:
         path: "/tmp/zabbix-release.deb"
         state: absent
 
+    # Verify installation
+    - name: Check Zabbix server is running
+      command: systemctl status zabbix-server
+      register: zabbix_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display Zabbix server status
+      debug:
+        var: zabbix_status.stdout_lines
+      when: zabbix_status.rc == 0
+
+    # Installation summary
     - name: Display installation complete message
       debug:
         msg: 
           - "Zabbix installation completed!"
           - "Access the Zabbix web interface at http://{{ ansible_default_ipv4.address }}/zabbix"
           - "Default credentials: Admin / zabbix"
+          - "Be sure to change the default password after first login!"
