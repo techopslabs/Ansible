@@ -1,0 +1,125 @@
+---
+# Ansible Playbook for Zabbix Installation on Ubuntu 22.04
+# Save this as zabbix_install.yml
+
+- name: Install Zabbix Server on Ubuntu 22.04
+  hosts: zabbix_servers
+  become: yes
+  vars:
+    zabbix_version: "6.4"
+    ubuntu_version: "ubuntu22.04"
+    db_password: "Secure@password@321"
+    timezone: "UTC"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Download Zabbix repository package
+      get_url:
+        url: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/{{ ubuntu_version }}/pool/main/z/zabbix-release/zabbix-release_{{ zabbix_version }}-1+{{ ubuntu_version }}_all.deb"
+        dest: "/tmp/zabbix-release.deb"
+      register: download_repo
+
+    - name: Install Zabbix repository
+      apt:
+        deb: "/tmp/zabbix-release.deb"
+      when: download_repo.changed
+
+    - name: Update apt cache after adding repository
+      apt:
+        update_cache: yes
+      when: download_repo.changed
+
+    - name: Install Zabbix components
+      apt:
+        name:
+          - zabbix-server-mysql
+          - zabbix-frontend-php
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+
+    - name: Install MySQL server
+      apt:
+        name: mysql-server
+        state: present
+
+    - name: Create Zabbix database
+      mysql_db:
+        name: zabbix
+        encoding: utf8mb4
+        collation: utf8mb4_bin
+        state: present
+
+    - name: Create Zabbix database user
+      mysql_user:
+        name: zabbix
+        host: localhost
+        password: "{{ db_password }}"
+        priv: 'zabbix.*:ALL'
+        state: present
+
+    - name: Enable log_bin_trust_function_creators
+      mysql_variables:
+        variable: log_bin_trust_function_creators
+        value: 1
+        mode: global
+
+    - name: Import Zabbix SQL schema
+      shell: zcat /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz | mysql -uzabbix -p{{ db_password }} zabbix
+      args:
+        executable: /bin/bash
+      register: import_result
+      changed_when: import_result.rc == 0
+
+    - name: Disable log_bin_trust_function_creators
+      mysql_variables:
+        variable: log_bin_trust_function_creators
+        value: 0
+        mode: global
+
+    - name: Configure Zabbix server database connection
+      lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: '^# DBPassword='
+        line: "DBPassword={{ db_password }}"
+
+    - name: Configure PHP timezone
+      replace:
+        path: /etc/php/*/apache2/php.ini
+        regexp: ';date.timezone ='
+        replace: "date.timezone = {{ timezone }}"
+
+    - name: Start and enable Zabbix server
+      systemd:
+        name: zabbix-server
+        state: restarted
+        enabled: yes
+
+    - name: Start and enable Zabbix agent
+      systemd:
+        name: zabbix-agent
+        state: restarted
+        enabled: yes
+
+    - name: Start and enable Apache
+      systemd:
+        name: apache2
+        state: restarted
+        enabled: yes
+
+    - name: Cleanup temporary files
+      file:
+        path: "/tmp/zabbix-release.deb"
+        state: absent
+
+    - name: Display installation complete message
+      debug:
+        msg: 
+          - "Zabbix installation completed!"
+          - "Access the Zabbix web interface at http://{{ ansible_default_ipv4.address }}/zabbix"
+          - "Default credentials: Admin / zabbix"
