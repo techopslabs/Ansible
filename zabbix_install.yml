@@ -3,7 +3,7 @@
 # Save this as zabbix_install.yml
 
 - name: Install Zabbix Server on Ubuntu 22.04
-  hosts: all
+  hosts: webservers
   become: yes
   vars:
     zabbix_version: "6.4"
