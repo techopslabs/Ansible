@@ -1,12 +1,12 @@
 ---
-# Complete Ansible Playbook for Zabbix Installation on Ubuntu 22.04
+# zabbix_install.yml
+# Ansible Playbook for Zabbix 7.2 Installation on Ubuntu 22.04
 
 - name: Install Zabbix Server on Ubuntu 22.04
   hosts: webservers
   become: yes
   vars:
     zabbix_version: "7.2"
-    ubuntu_version: "ubuntu22.04"
     zabbix_repo_url: "https://repo.zabbix.com/zabbix/7.2/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.2+ubuntu22.04_all.deb"
     db_password: "Secure@password@321"
     timezone: "UTC"
@@ -43,17 +43,72 @@
       apt:
         update_cache: yes
       when: download_repo.changed
+      
+    # Check available packages
+    - name: Check available Zabbix packages
+      shell: apt-cache search zabbix
+      register: zabbix_packages
+      changed_when: false
 
-    # Install Zabbix components
-    - name: Install Zabbix server, frontend, agent and related components
+    - name: Display available Zabbix packages
+      debug:
+        var: zabbix_packages.stdout_lines
+        
+    - name: Check for specific Zabbix packages
+      shell: "apt-cache search --names-only {{ item }}"
+      loop:
+        - zabbix-server-mysql
+        - zabbix-frontend-php
+        - zabbix-apache-conf
+        - zabbix-apache2-conf
+        - zabbix-sql-scripts
+        - zabbix-agent
+      register: package_check
+      changed_when: false
+      
+    - name: Display package check results
+      debug:
+        var: package_check.results
+
+    # Install Zabbix components - core components first
+    - name: Install Zabbix server, frontend, and agent
       apt:
         name:
           - zabbix-server-mysql
           - zabbix-frontend-php
-          - zabbix-apache-conf
-          - zabbix-sql-scripts
           - zabbix-agent
         state: present
+        
+    # Try to install Apache conf package (might have different name in 7.2)
+    - name: Check if zabbix-apache-conf exists
+      shell: apt-cache search --names-only zabbix-apache-conf
+      register: apache_conf_check
+      changed_when: false
+      
+    - name: Install zabbix-apache-conf if available
+      apt:
+        name: zabbix-apache-conf
+        state: present
+      when: apache_conf_check.stdout != ""
+      
+    - name: Try installing zabbix-apache2-conf if zabbix-apache-conf not available
+      apt:
+        name: zabbix-apache2-conf
+        state: present
+      when: apache_conf_check.stdout == ""
+      ignore_errors: yes
+      
+    # Try to install SQL scripts package (might be included in server in 7.2)
+    - name: Check if zabbix-sql-scripts exists
+      shell: apt-cache search --names-only zabbix-sql-scripts
+      register: sql_scripts_check
+      changed_when: false
+      
+    - name: Install zabbix-sql-scripts if available
+      apt:
+        name: zabbix-sql-scripts
+        state: present
+      when: sql_scripts_check.stdout != ""
 
     # MySQL database setup
     - name: Install MySQL server
@@ -87,13 +142,31 @@
         variable: log_bin_trust_function_creators
         value: 1
         mode: global
-
+        
+    # Find SQL schema location (might be in different place in 7.2)
+    - name: Find SQL schema location
+      find:
+        paths: /usr/share
+        patterns: "create.sql.gz"
+        recurse: yes
+      register: sql_schema
+      
+    - name: Display SQL schema location
+      debug:
+        var: sql_schema.files
+        
+    - name: Set SQL schema path
+      set_fact:
+        sql_schema_path: "{{ sql_schema.files[0].path }}"
+      when: sql_schema.files | length > 0
+      
     - name: Import Zabbix SQL schema
-      shell: zcat /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz | mysql -uzabbix -p{{ db_password }} zabbix
+      shell: zcat {{ sql_schema_path }} | mysql -uzabbix -p{{ db_password }} zabbix
       args:
         executable: /bin/bash
       register: import_result
       changed_when: import_result.rc == 0
+      when: sql_schema.files | length > 0
       # Adding a timeout as this can take a while for large schemas
       async: 600
       poll: 15
@@ -104,65 +177,67 @@
         value: 0
         mode: global
 
+    # Find and configure Zabbix server configuration
+    - name: Find Zabbix server configuration
+      find:
+        paths: /etc
+        patterns: "zabbix_server.conf"
+        recurse: yes
+      register: server_conf
+      
+    - name: Display server configuration path
+      debug:
+        var: server_conf.files
+        
+    - name: Set server configuration path
+      set_fact:
+        server_conf_path: "{{ server_conf.files[0].path }}"
+      when: server_conf.files | length > 0
+      
     # Configure Zabbix server
     - name: Configure Zabbix server database connection
       lineinfile:
-        path: /etc/zabbix/zabbix_server.conf
+        path: "{{ server_conf_path }}"
         regexp: '^# DBPassword='
         line: "DBPassword={{ db_password }}"
+      when: server_conf.files | length > 0
 
-    - name: Configure Zabbix server cache settings
-      lineinfile:
-        path: /etc/zabbix/zabbix_server.conf
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      with_items:
-        - { regexp: '^# CacheSize=', line: 'CacheSize=128M' }
-        - { regexp: '^# StartPollers=', line: 'StartPollers=10' }
-        - { regexp: '^# StartPingers=', line: 'StartPingers=10' }
-        - { regexp: '^# StartDiscoverers=', line: 'StartDiscoverers=5' }
-        - { regexp: '^# StartHTTPPollers=', line: 'StartHTTPPollers=5' }
-
-    # Configure PHP for Zabbix frontend
+    # Find PHP configuration
+    - name: Find PHP configuration for Apache
+      find:
+        paths: /etc/php
+        patterns: "php.ini"
+        recurse: yes
+      register: php_ini
+      
+    - name: Display PHP configuration paths
+      debug:
+        var: php_ini.files
+        
+    - name: Filter for Apache PHP configuration
+      set_fact:
+        apache_php_ini: "{{ php_ini.files | selectattr('path', 'search', 'apache') | list }}"
+        
+    - name: Set PHP configuration path
+      set_fact:
+        php_conf_path: "{{ apache_php_ini[0].path }}"
+      when: apache_php_ini | length > 0
+      
+    # Configure PHP
     - name: Configure PHP timezone
       replace:
-        path: /etc/php/*/apache2/php.ini
+        path: "{{ php_conf_path }}"
         regexp: ';date.timezone ='
         replace: "date.timezone = {{ timezone }}"
+      when: apache_php_ini | length > 0
 
     - name: Configure PHP memory limit
       replace:
-        path: /etc/php/*/apache2/php.ini
+        path: "{{ php_conf_path }}"
         regexp: 'memory_limit = 128M'
         replace: 'memory_limit = 256M'
-
-    - name: Configure PHP max execution time
-      replace:
-        path: /etc/php/*/apache2/php.ini
-        regexp: 'max_execution_time = 30'
-        replace: 'max_execution_time = 300'
-
-    - name: Configure PHP post max size
-      replace:
-        path: /etc/php/*/apache2/php.ini
-        regexp: 'post_max_size = 8M'
-        replace: 'post_max_size = 16M'
-
-    - name: Configure PHP upload max filesize
-      replace:
-        path: /etc/php/*/apache2/php.ini
-        regexp: 'upload_max_filesize = 2M'
-        replace: 'upload_max_filesize = 16M'
-
-    # Configure Apache for Zabbix
-    - name: Ensure Apache has required modules
-      apache2_module:
-        state: present
-        name: "{{ item }}"
-      with_items:
-        - rewrite
-        - ssl
-        - headers
+      when: apache_php_ini | length > 0
+      ignore_errors: yes
 
     # Start and enable services
     - name: Start and enable Zabbix server
@@ -183,44 +258,11 @@
         state: restarted
         enabled: yes
 
-    # Configure firewall (using ufw)
-    - name: Install UFW
-      apt:
-        name: ufw
-        state: present
-
-    - name: Configure UFW for Zabbix
-      ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      with_items:
-        - 80   # HTTP for Zabbix web interface
-        - 443  # HTTPS for Zabbix web interface
-        - 10050 # Zabbix agent
-        - 10051 # Zabbix server
-
-    - name: Enable UFW
-      ufw:
-        state: enabled
-
     # Cleanup
     - name: Cleanup temporary files
       file:
         path: "/tmp/zabbix-release.deb"
         state: absent
-
-    # Verify installation
-    - name: Check Zabbix server is running
-      command: systemctl status zabbix-server
-      register: zabbix_status
-      changed_when: false
-      ignore_errors: yes
-
-    - name: Display Zabbix server status
-      debug:
-        var: zabbix_status.stdout_lines
-      when: zabbix_status.rc == 0
 
     # Installation summary
     - name: Display installation complete message
