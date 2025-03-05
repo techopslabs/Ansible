@@ -1,125 +1,71 @@
----
-# Ansible Playbook for Zabbix Installation on Ubuntu 22.04
-# Save this as zabbix_install.yml
+#!/bin/bash
+# Zabbix Installation Script for Ubuntu 22.04
+# This script installs Zabbix 6.4 with MySQL database
 
-- name: Install Zabbix Server on Ubuntu 22.04
-  hosts: webservers
-  become: yes
-  vars:
-    zabbix_version: "6.4"
-    ubuntu_version: "ubuntu22.04"
-    db_password: "Secure@password@321"
-    timezone: "UTC"
+set -e
 
-  tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
-    - name: Download Zabbix repository package
-      get_url:
-        url: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/{{ ubuntu_version }}/pool/main/z/zabbix-release/zabbix-release_{{ zabbix_version }}-1+{{ ubuntu_version }}_all.deb"
-        dest: "/tmp/zabbix-release.deb"
-      register: download_repo
+# Configuration variables - customize these as needed
+DB_PASSWORD="Secure@password@321"
+ZABBIX_REPO_URL="https://repo.zabbix.com/zabbix/7.4/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.4-0.1%2Bubuntu16.04_all.deb"
 
-    - name: Install Zabbix repository
-      apt:
-        deb: "/tmp/zabbix-release.deb"
-      when: download_repo.changed
+echo -e "${GREEN}Starting Zabbix 7.4 installation on Ubuntu 22.04...${NC}"
 
-    - name: Update apt cache after adding repository
-      apt:
-        update_cache: yes
-      when: download_repo.changed
+# Step 1: Install Zabbix repository
+echo -e "${GREEN}Installing Zabbix repository...${NC}"
+wget "$ZABBIX_REPO_URL"
+sudo dpkg -i zabbix-release_7.4-0.1+ubuntu16.04_all.deb
+sudo apt update
 
-    - name: Install Zabbix components
-      apt:
-        name:
-          - zabbix-server-mysql
-          - zabbix-frontend-php
-          - zabbix-apache-conf
-          - zabbix-sql-scripts
-          - zabbix-agent
-        state: present
+# Step 2: Install Zabbix server, frontend, and agent
+echo -e "${GREEN}Installing Zabbix components...${NC}"
+sudo apt install -y zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts zabbix-agent
 
-    - name: Install MySQL server
-      apt:
-        name: mysql-server
-        state: present
+# Step 3: Install MySQL if not already installed
+echo -e "${GREEN}Installing MySQL server if not already installed...${NC}"
+sudo apt install -y mysql-server
 
-    - name: Create Zabbix database
-      mysql_db:
-        name: zabbix
-        encoding: utf8mb4
-        collation: utf8mb4_bin
-        state: present
+# Step 4: Create initial database
+echo -e "${GREEN}Creating Zabbix database...${NC}"
+sudo mysql -e "create database zabbix character set utf8mb4 collate utf8mb4_bin;"
+sudo mysql -e "create user zabbix@localhost identified by '$DB_PASSWORD';"
+sudo mysql -e "grant all privileges on zabbix.* to zabbix@localhost;"
+sudo mysql -e "set global log_bin_trust_function_creators = 1;"
 
-    - name: Create Zabbix database user
-      mysql_user:
-        name: zabbix
-        host: localhost
-        password: "{{ db_password }}"
-        priv: 'zabbix.*:ALL'
-        state: present
+# Step 5: Import initial schema and data
+echo -e "${GREEN}Importing initial schema and data (this may take a few minutes)...${NC}"
+zcat /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz | sudo mysql -uzabbix -p"$DB_PASSWORD" zabbix
 
-    - name: Enable log_bin_trust_function_creators
-      mysql_variables:
-        variable: log_bin_trust_function_creators
-        value: 1
-        mode: global
+# Step 6: Disable log_bin_trust_function_creators option after import
+echo -e "${GREEN}Configuring MySQL after import...${NC}"
+sudo mysql -e "set global log_bin_trust_function_creators = 0;"
 
-    - name: Import Zabbix SQL schema
-      shell: zcat /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz | mysql -uzabbix -p{{ db_password }} zabbix
-      args:
-        executable: /bin/bash
-      register: import_result
-      changed_when: import_result.rc == 0
+# Step 7: Configure the database for Zabbix server
+echo -e "${GREEN}Configuring Zabbix server...${NC}"
+sudo sed -i "s/# DBPassword=/DBPassword=$DB_PASSWORD/" /etc/zabbix/zabbix_server.conf
 
-    - name: Disable log_bin_trust_function_creators
-      mysql_variables:
-        variable: log_bin_trust_function_creators
-        value: 0
-        mode: global
+# Step 8: Configure PHP for Zabbix frontend
+echo -e "${GREEN}Configuring PHP for Zabbix frontend...${NC}"
+sudo sed -i 's/;date.timezone =/date.timezone = UTC/' /etc/php/*/apache2/php.ini
 
-    - name: Configure Zabbix server database connection
-      lineinfile:
-        path: /etc/zabbix/zabbix_server.conf
-        regexp: '^# DBPassword='
-        line: "DBPassword={{ db_password }}"
+# Step 9: Start Zabbix server and agent processes
+echo -e "${GREEN}Starting Zabbix services...${NC}"
+sudo systemctl restart zabbix-server zabbix-agent apache2
+sudo systemctl enable zabbix-server zabbix-agent apache2
 
-    - name: Configure PHP timezone
-      replace:
-        path: /etc/php/*/apache2/php.ini
-        regexp: ';date.timezone ='
-        replace: "date.timezone = {{ timezone }}"
+# Step 10: Check service status
+echo -e "${GREEN}Checking service status...${NC}"
+sudo systemctl status zabbix-server --no-pager
+sudo systemctl status zabbix-agent --no-pager
+sudo systemctl status apache2 --no-pager
 
-    - name: Start and enable Zabbix server
-      systemd:
-        name: zabbix-server
-        state: restarted
-        enabled: yes
+# Cleanup
+rm zabbix-release_7.4-0.1+ubuntu16.04_all.deb
 
-    - name: Start and enable Zabbix agent
-      systemd:
-        name: zabbix-agent
-        state: restarted
-        enabled: yes
-
-    - name: Start and enable Apache
-      systemd:
-        name: apache2
-        state: restarted
-        enabled: yes
-
-    - name: Cleanup temporary files
-      file:
-        path: "/tmp/zabbix-release.deb"
-        state: absent
-
-    - name: Display installation complete message
-      debug:
-        msg: 
-          - "Zabbix installation completed!"
-          - "Access the Zabbix web interface at http://{{ ansible_default_ipv4.address }}/zabbix"
-          - "Default credentials: Admin / zabbix"
+echo -e "${GREEN}Zabbix installation completed!${NC}"
+echo -e "${GREEN}Access the Zabbix web interface at http://server_ip_or_name/zabbix${NC}"
+echo -e "${GREEN}Default credentials: Admin / zabbix${NC}"
