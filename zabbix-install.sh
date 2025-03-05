@@ -1,6 +1,6 @@
 #!/bin/bash
 # Zabbix Installation Script for Ubuntu 22.04
-# This script installs Zabbix 6.4 with MySQL database
+# This script installs Zabbix 7.2 with MySQL database
 
 set -e
 
@@ -11,15 +11,14 @@ NC='\033[0m' # No Color
 
 # Configuration variables - customize these as needed
 DB_PASSWORD="Secure@password@321"
-ZABBIX_VERSION="6.4"
-UBUNTU_VERSION="ubuntu22.04"
+ZABBIX_REPO_URL="https://repo.zabbix.com/zabbix/7.2/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.2+ubuntu22.04_all.deb"
 
-echo -e "${GREEN}Starting Zabbix $ZABBIX_VERSION installation on Ubuntu 22.04...${NC}"
+echo -e "${GREEN}Starting Zabbix 7.2 installation on Ubuntu 22.04...${NC}"
 
 # Step 1: Install Zabbix repository
 echo -e "${GREEN}Installing Zabbix repository...${NC}"
-wget https://repo.zabbix.com/zabbix/$ZABBIX_VERSION/$UBUNTU_VERSION/pool/main/z/zabbix-release/zabbix-release_$ZABBIX_VERSION-1+$UBUNTU_VERSION\_all.deb
-sudo dpkg -i zabbix-release_$ZABBIX_VERSION-1+$UBUNTU_VERSION\_all.deb
+wget "$ZABBIX_REPO_URL"
+sudo dpkg -i zabbix-release_latest_7.2+ubuntu22.04_all.deb
 sudo apt update
 
 # Step 2: Install Zabbix server, frontend, and agent
@@ -65,7 +64,7 @@ sudo systemctl status zabbix-agent --no-pager
 sudo systemctl status apache2 --no-pager
 
 # Cleanup
-rm zabbix-release_$ZABBIX_VERSION-1+$UBUNTU_VERSION\_all.deb
+rm zabbix-release_latest_7.2+ubuntu22.04_all.deb
 
 echo -e "${GREEN}Zabbix installation completed!${NC}"
 echo -e "${GREEN}Access the Zabbix web interface at http://server_ip_or_name/zabbix${NC}"
